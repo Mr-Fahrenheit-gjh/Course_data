@@ -27,6 +27,7 @@ class Offering:
     review_count: int | None
     slots: frozenset[Slot]
     score: float
+    has_early_class: bool
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,8 @@ class TimetableResult:
     missing_courses: list[str]
     total_score: float | None
     average_score: float | None
+    early_class_count: int
+    max_early_classes: int | None
     stats: SearchStats
     warnings: list[str] = field(default_factory=list)
 
@@ -53,12 +56,28 @@ class ScheduleParseError(ValueError):
     pass
 
 
+def load_input_config(input_path: Path) -> dict[str, Any]:
+    return json.loads(input_path.read_text(encoding="utf-8"))
+
+
 def load_requested_courses(input_path: Path) -> list[str]:
-    data = json.loads(input_path.read_text(encoding="utf-8"))
+    return parse_requested_courses(load_input_config(input_path))
+
+
+def parse_requested_courses(data: dict[str, Any]) -> list[str]:
     courses = data.get("compulsory")
     if not isinstance(courses, list) or not all(isinstance(course, str) for course in courses):
         raise ValueError("input JSON must contain a string list field named 'compulsory'.")
     return courses
+
+
+def parse_max_early_classes(data: dict[str, Any]) -> int | None:
+    value = data.get("max_early_classes")
+    if value is None:
+        return None
+    if not isinstance(value, int) or value < 0:
+        raise ValueError("max_early_classes must be a non-negative integer.")
+    return value
 
 
 def parse_schedule_code(schedule_code: str) -> frozenset[Slot]:
@@ -185,6 +204,7 @@ def load_offerings(sqlite_path: Path, course_codes: list[str], unrated_score: fl
                 review_count=review_count,
                 slots=slots,
                 score=score,
+                has_early_class=has_early_class(slots),
             )
         )
 
@@ -207,14 +227,22 @@ def offering_sort_key(offering: Offering) -> tuple[float, int, str]:
     return (offering.score, offering.review_count or 0, offering.teaching_class)
 
 
+def has_early_class(slots: frozenset[Slot]) -> bool:
+    return any(slot.period == 1 for slot in slots)
+
+
 def build_timetable(
     input_path: Path,
     sqlite_path: Path,
     *,
     allow_missing: bool = False,
     unrated_score: float = 0.0,
+    max_early_classes: int | None = None,
 ) -> TimetableResult:
-    requested_courses = load_requested_courses(input_path)
+    input_config = load_input_config(input_path)
+    requested_courses = parse_requested_courses(input_config)
+    if max_early_classes is None:
+        max_early_classes = parse_max_early_classes(input_config)
     by_course, warnings = load_offerings(sqlite_path, requested_courses, unrated_score=unrated_score)
     raw_candidate_count = sum(len(offerings) for offerings in by_course.values())
     missing_courses = [course_code for course_code in requested_courses if not by_course[course_code]]
@@ -233,13 +261,15 @@ def build_timetable(
             missing_courses=missing_courses,
             total_score=None,
             average_score=None,
+            early_class_count=0,
+            max_early_classes=max_early_classes,
             stats=stats,
             warnings=warnings,
         )
 
     searchable_courses = [course_code for course_code in requested_courses if by_course[course_code]]
     compressed = compress_offerings({course_code: by_course[course_code] for course_code in searchable_courses})
-    selected, total_score, visited_nodes = search_best_timetable(compressed)
+    selected, total_score, visited_nodes = search_best_timetable(compressed, max_early_classes=max_early_classes)
     compressed_counts = {course_code: len(offerings) for course_code, offerings in compressed.items()}
     compressed_candidate_count = sum(compressed_counts.values())
     stats = SearchStats(
@@ -257,12 +287,15 @@ def build_timetable(
             missing_courses=missing_courses,
             total_score=None,
             average_score=None,
+            early_class_count=0,
+            max_early_classes=max_early_classes,
             stats=stats,
             warnings=warnings,
         )
 
     selected_by_course = {offering.course_code: offering for offering in selected}
     ordered_selected = [selected_by_course[course_code] for course_code in searchable_courses]
+    early_class_count = sum(1 for offering in ordered_selected if offering.has_early_class)
     average_score = total_score / len(ordered_selected) if ordered_selected else None
     return TimetableResult(
         status="optimal",
@@ -271,12 +304,18 @@ def build_timetable(
         missing_courses=missing_courses,
         total_score=total_score,
         average_score=average_score,
+        early_class_count=early_class_count,
+        max_early_classes=max_early_classes,
         stats=stats,
         warnings=warnings,
     )
 
 
-def search_best_timetable(by_course: dict[str, list[Offering]]) -> tuple[list[Offering] | None, float, int]:
+def search_best_timetable(
+    by_course: dict[str, list[Offering]],
+    *,
+    max_early_classes: int | None = None,
+) -> tuple[list[Offering] | None, float, int]:
     if not by_course:
         return [], 0.0, 1
 
@@ -289,9 +328,17 @@ def search_best_timetable(by_course: dict[str, list[Offering]]) -> tuple[list[Of
     best_score = float("-inf")
     visited_nodes = 0
 
-    def dfs(index: int, occupied: frozenset[Slot], selected: list[Offering], score: float) -> None:
+    def dfs(
+        index: int,
+        occupied: frozenset[Slot],
+        selected: list[Offering],
+        score: float,
+        early_class_count: int,
+    ) -> None:
         nonlocal best_selection, best_score, visited_nodes
         visited_nodes += 1
+        if max_early_classes is not None and early_class_count > max_early_classes:
+            return
         if score + best_remaining[index] < best_score:
             return
         if index == len(course_order):
@@ -304,10 +351,16 @@ def search_best_timetable(by_course: dict[str, list[Offering]]) -> tuple[list[Of
         for offering in by_course[course_code]:
             if occupied.isdisjoint(offering.slots):
                 selected.append(offering)
-                dfs(index + 1, occupied | offering.slots, selected, score + offering.score)
+                dfs(
+                    index + 1,
+                    occupied | offering.slots,
+                    selected,
+                    score + offering.score,
+                    early_class_count + int(offering.has_early_class),
+                )
                 selected.pop()
 
-    dfs(0, frozenset(), [], 0.0)
+    dfs(0, frozenset(), [], 0.0, 0)
     return best_selection, best_score, visited_nodes
 
 
@@ -318,6 +371,8 @@ def result_to_dict(result: TimetableResult) -> dict[str, Any]:
         "missing_courses": result.missing_courses,
         "total_score": result.total_score,
         "average_score": result.average_score,
+        "early_class_count": result.early_class_count,
+        "max_early_classes": result.max_early_classes,
         "stats": {
             "raw_candidate_count": result.stats.raw_candidate_count,
             "compressed_candidate_count": result.stats.compressed_candidate_count,
@@ -340,6 +395,7 @@ def offering_to_dict(offering: Offering) -> dict[str, Any]:
         "avg_rating": offering.avg_rating,
         "review_count": offering.review_count,
         "score": offering.score,
+        "has_early_class": offering.has_early_class,
     }
 
 
@@ -350,6 +406,9 @@ def format_result(result: TimetableResult) -> str:
     if result.total_score is not None and result.average_score is not None:
         lines.append(f"Total score: {result.total_score:.3f}")
         lines.append(f"Average score: {result.average_score:.3f}")
+
+    early_limit = "unlimited" if result.max_early_classes is None else str(result.max_early_classes)
+    lines.append(f"Early classes: {result.early_class_count} / {early_limit}")
 
     lines.append(
         "Stats: "
@@ -368,10 +427,11 @@ def format_result(result: TimetableResult) -> str:
         for offering in result.selected:
             rating = "unrated" if offering.avg_rating is None else f"{offering.avg_rating:.3f}"
             reviews = 0 if offering.review_count is None else offering.review_count
+            early = "yes" if offering.has_early_class else "no"
             lines.append(
                 f"- {offering.course_code} {offering.course_name} | "
                 f"{offering.teacher} | {offering.teaching_class} | "
-                f"rating={rating} reviews={reviews} | {offering.schedule_code}"
+                f"rating={rating} reviews={reviews} early={early} | {offering.schedule_code}"
             )
 
     if result.warnings:

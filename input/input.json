@@ -9,5 +9,6 @@
         "ECON2404",
         "ECON2403",
         "MARX1205"
-    ]
+    ],
+    "max_early_classes": 1
 }
