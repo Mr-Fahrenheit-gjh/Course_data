@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -298,6 +299,7 @@ def build_timetable(
     allow_missing: bool = False,
     unrated_score: float = 0.0,
     max_early_classes: int | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> TimetableResult:
     input_config = load_input_config(input_path)
     compulsory_courses, optional_courses = parse_course_groups(input_config)
@@ -339,6 +341,7 @@ def build_timetable(
         compulsory_compressed,
         optional_compressed,
         max_early_classes=max_early_classes,
+        progress_callback=progress_callback,
     )
     compressed_counts = {
         **{course_code: len(offerings) for course_code, offerings in compulsory_compressed.items()},
@@ -432,6 +435,7 @@ def search_best_timetable(
     optional_by_course: dict[str, list[Offering]],
     *,
     max_early_classes: int | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[Offering] | None, float | None, float | None, float | None, int]:
     if not compulsory_by_course and not optional_by_course:
         return [], 0.0, 0.0, None, 1
@@ -458,6 +462,9 @@ def search_best_timetable(
     ) -> None:
         nonlocal best_selection, best_key, best_weighted_sum, best_total_credits, best_weighted_average, visited_nodes
         visited_nodes += 1
+        if progress_callback and (visited_nodes == 1 or visited_nodes % 10000 == 0):
+            current_course = course_items[index][1] if index < len(course_items) else "checking"
+            progress_callback(min(index, max(len(course_items) - 1, 0)), len(course_items), current_course)
         if max_early_classes is not None and early_class_count > max_early_classes:
             return
         if index == len(course_items):
@@ -493,6 +500,8 @@ def search_best_timetable(
                 selected.pop()
 
     dfs(0, frozenset(), [], 0.0, 0.0, 0)
+    if progress_callback:
+        progress_callback(len(course_items), len(course_items), "done")
     return best_selection, best_weighted_sum, best_total_credits, best_weighted_average, visited_nodes
 
 
