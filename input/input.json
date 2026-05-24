@@ -3,12 +3,17 @@
         "MIL1201",
         "ECON1501",
         "SI1210",
-        "BUSS2515",
         "MARX1219",
-        "BUSS2302",
         "ECON2404",
         "ECON2403",
         "MARX1205"
     ],
-    "max_early_classes": 1
+    "max_early_classes": 1,
+    "optional": [
+        "BUSS2515",
+        "BUSS2302",
+        "MATH1201",
+        "MATH1205",
+        "BUSS1302"
+    ]
 }
