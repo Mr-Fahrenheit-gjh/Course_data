@@ -17,6 +17,12 @@ from sjtu_course_analysis.scheduler import (
 
 DEFAULT_INPUT = Path("input/input.json")
 DEFAULT_SQLITE = Path("data/processed/course_reviews_simple.sqlite")
+DEFAULT_TIMETABLE_SETTINGS: dict[str, int | str | None] = {
+    "max_early_classes": 1,
+    "search_mode": "approx",
+    "beam_width": 1000,
+    "per_course_limit": 40,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,38 +41,74 @@ def parse_args() -> argparse.Namespace:
 
 def read_timetable_settings(input_path: Path, debug_mode: bool) -> dict[str, int | str | None]:
     input_config = load_input_config(input_path)
+    settings = parse_timetable_settings(input_config)
+    if debug_mode:
+        return settings
+
+    changed = False
+    while True:
+        print_timetable_settings(settings)
+        value = input(c("请输入要修改的序号，直接回车开始排课：", "cyan", True)).strip()
+        if not value:
+            if changed:
+                save_timetable_settings(input_path, input_config, settings)
+                print(c("设置已保存到 input.json。", "green", True))
+            return settings
+        if value == "1":
+            settings["search_mode"] = read_search_mode(str(settings["search_mode"]))
+            changed = True
+        elif value == "2":
+            current_early = settings["max_early_classes"] if settings["max_early_classes"] is not None else "不限制"
+            settings["max_early_classes"] = read_optional_nonnegative_int(
+                f"早八课程数量最多允许多少门？直接回车使用当前值 {current_early}，输入 none 表示不限制：",
+                default=settings["max_early_classes"],
+                allow_none_text=True,
+            )
+            changed = True
+        elif value == "3":
+            settings["beam_width"] = read_optional_nonnegative_int(
+                f"beam_width 设置为多少？直接回车使用当前值 {settings['beam_width']}：",
+                default=int(settings["beam_width"]),
+            )
+            changed = True
+        elif value == "4":
+            settings["per_course_limit"] = read_optional_nonnegative_int(
+                f"per_course_limit 设置为多少？直接回车使用当前值 {settings['per_course_limit']}：",
+                default=int(settings["per_course_limit"]),
+            )
+            changed = True
+        elif value == "5":
+            settings = dict(DEFAULT_TIMETABLE_SETTINGS)
+            changed = True
+            print(c("已恢复默认设置。", "green", True))
+        else:
+            print(c("请输入 1-5，或直接回车开始排课。", "yellow", True))
+
+
+def parse_timetable_settings(input_config: dict) -> dict[str, int | str | None]:
     search_mode = input_config.get("search_mode", "exact")
     if search_mode not in {"exact", "approx"}:
         raise ValueError("search_mode must be 'exact' or 'approx'.")
-    settings: dict[str, int | str | None] = {
+    return {
         "max_early_classes": parse_max_early_classes(input_config),
         "search_mode": search_mode,
         "beam_width": int(input_config.get("beam_width", 500)),
         "per_course_limit": int(input_config.get("per_course_limit", 30)),
     }
-    if debug_mode:
-        return settings
 
+
+def print_timetable_settings(settings: dict[str, int | str | None]) -> None:
     print(c("当前排课设置：", "cyan", True))
-    print(f"  搜索模式: {settings['search_mode']} ({'近似 beam search' if settings['search_mode'] == 'approx' else '精确 DFS'})")
-    print(f"  早八上限: {settings['max_early_classes'] if settings['max_early_classes'] is not None else '不限制'}")
-    print(f"  beam_width: {settings['beam_width']}")
-    print(f"  per_course_limit: {settings['per_course_limit']}")
-    value = input(c("是否修改这些设置？直接回车表示不修改，输入 y 修改：", "cyan", True)).strip().lower()
-    if value not in {"y", "yes", "是"}:
-        return settings
+    print(f"  1. 搜索模式: {settings['search_mode']} ({'近似 beam search' if settings['search_mode'] == 'approx' else '精确 DFS'})")
+    print(f"  2. 早八上限: {settings['max_early_classes'] if settings['max_early_classes'] is not None else '不限制'}")
+    print(f"  3. beam_width: {settings['beam_width']}")
+    print(f"  4. per_course_limit: {settings['per_course_limit']}")
+    print("  5. 恢复默认设置")
 
-    settings["search_mode"] = read_search_mode(str(settings["search_mode"]))
-    current_early = settings["max_early_classes"] if settings["max_early_classes"] is not None else "不限制"
-    settings["max_early_classes"] = read_optional_nonnegative_int(
-        f"早八课程数量最多允许多少门？直接回车使用当前值 {current_early}，输入 none 表示不限制：",
-        default=settings["max_early_classes"],
-        allow_none_text=True,
-    )
-    if settings["search_mode"] == "approx":
-        settings["beam_width"] = read_optional_nonnegative_int("beam_width 设置为多少？直接回车使用 500：", default=500)
-        settings["per_course_limit"] = read_optional_nonnegative_int("per_course_limit 设置为多少？直接回车使用 30：", default=30)
-    return settings
+
+def save_timetable_settings(input_path: Path, input_config: dict, settings: dict[str, int | str | None]) -> None:
+    input_config.update(settings)
+    input_path.write_text(json.dumps(input_config, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
 
 
 def read_search_mode(current: str) -> str:

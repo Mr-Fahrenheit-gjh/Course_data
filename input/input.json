@@ -9,7 +9,7 @@
         "MARX1205"
     ],
     "max_early_classes": 1,
-    "search_mode": "approx",
+    "search_mode": "exact",
     "beam_width": 1000,
     "per_course_limit": 40,
     "optional": [
